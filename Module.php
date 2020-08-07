@@ -21,7 +21,7 @@
 		/**
 		 * apex markers are marked with @
 		 */
-		protected const HAS_ORIGIN_MARKER = false;
+		protected const HAS_ORIGIN_MARKER = true;
 		protected static $permitted_records = [
 			'A',
 			'AAAA',
@@ -32,6 +32,15 @@
 			'SRV',
 			'TXT'
 		];
+
+		protected const AXFR_ATTR_MAP = [
+			'A'     => 'ip',
+			'AAAA'  => 'ip',
+			'CNAME' => 'name',
+			'NS'    => 'name',
+			'TXT'   => 'data'
+		];
+
 		protected $metaCache = [];
 		// @var array API credentials
 		private $key;
@@ -71,17 +80,59 @@
 			]);
 
 			try {
-				$zoneid = $this->getZoneId($zone);
-				$ret = $api->do('POST', "domains/${zoneid}/records", $this->formatRecord($record));
-				$record->setMeta('id', $ret['id']);
+				$ret = $api->do('POST', "dns/zones/_/records", ['dns_zone' => ['name' => $zone], 'details' => $this->formatRecord($record)]);
+				$record->setMeta('id', $ret['dns_record']['id']);
 				$this->addCache($record);
 			} catch (ClientException $e) {
-				return error("Failed to create record `%s': %s", (string)$record, $this->renderMessage($e));
+				return error("Failed to create record `%s': %s", (string)$record, array_get($this->renderMessage($e), 'description', ''));
 			}
 
 			return (bool)$ret;
 		}
 
+		protected function canonicalizeRecord(
+			string &$zone,
+			string &$subdomain,
+			string &$rr,
+			string &$param,
+			int &$ttl = null
+		): bool {
+			if (!parent::canonicalizeRecord($zone, $subdomain, $rr, $param,
+				$ttl))
+			{
+				return false;
+			}
+			if ($rr === 'TXT') {
+				$param = str_replace('"', '', $param);
+			}
+			return true;
+		}
+
+
+		private function meld($uri, array $args): string
+		{
+			if (is_array($uri)) {
+				$uri = \ArgumentFormatter::format(...$uri);
+			}
+			$uri .= false !== strpos($uri, '?') ? '&' : '?';
+
+			$fn = static function ($arr, $carry = '') use (&$fn) {
+				$return = [];
+				foreach ($arr as $k => $v) {
+					$label = $carry ? "${carry}[$k]" : $k;
+					if (is_array($v)) {
+						$v = implode('&', $fn($v, $label));
+						$return[] = $v;
+					} else {
+						$return[] = $label . '=' . rawurlencode((string)$v);
+					}
+				}
+
+				return $return;
+			};
+
+			return $uri . implode('&', $fn($args));
+		}
 		/**
 		 * @inheritDoc
 		 */
@@ -101,8 +152,7 @@
 			}
 
 			try {
-				$domainid = $this->getZoneId($zone);
-				$api->do('DELETE', "domains/${domainid}/records/${id}");
+				$api->do('DELETE', "dns/records/${id}");
 			} catch (ClientException $e) {
 				$fqdn = ltrim(implode('.', [$subdomain, $zone]), '.');
 
@@ -133,7 +183,7 @@
 					'soa_email' => "hostmaster@${domain}"
 				]);
 			} catch (ClientException $e) {
-				return error("Failed to add zone `%s', error: %s", $domain, $this->renderMessage($e));
+				return error("Failed to add zone `%s', error: %s", $domain, array_get($this->renderMessage($e), 'description', 'unknown'));
 			}
 
 			return true;
@@ -149,13 +199,9 @@
 		{
 			$api = $this->makeApi();
 			try {
-				$domainid = $this->getZoneId($domain);
-				if (!$domainid) {
-					return warn("Domain ID not found - `%s' already removed?", $domain);
-				}
-				$api->do('DELETE', "domains/${domainid}");
+				$api->do('DELETE', "dns/zones/_/?dns_zone[name]=%(domain)s", ['domain' => $domain]);
 			} catch (ClientException $e) {
-				return error("Failed to remove zone `%s', error: %s", $domain, $this->renderMessage($e));
+				return error("Failed to remove zone `%s', error: %s", $domain, array_get($this->renderMessage($e), 'description', 'unknown'));
 			}
 
 			return true;
@@ -201,29 +247,47 @@
 				return null;
 			}
 			$this->zoneCache[$domain] = [];
-			foreach ($records['data'] as $r) {
-				switch ($r['type']) {
+			foreach ($records['dns_records'] as $r) {
+				$rr = strtoupper($r['record_type']);
+				$key = rtrim('properties.value.' . (self::AXFR_ATTR_MAP[$rr] ?? ''), '.');
+				$attr = array_get($r, $key, null);
+				switch ($rr) {
+					case 'NS':
+						if ($r['name'] === '@') {
+							continue 2;
+						}
+						$parameter = $attr;
+						break;
 					case 'CAA':
 						// @XXX flags always defaults to "0"
-						$parameter = '0 ' . $r['tag'] . ' ' . $r['target'];
+						$parameter = $attr['flags'] . ' ' . $attr['property_type'] . ' ' . $attr['property_value'];
 						break;
 					case 'SRV':
-						$parameter = $r['priority'] . ' ' . $r['weight'] . ' ' . $r['port'] . ' ' . $r['target'];
+						$parameter = $attr['priority'] . ' ' . $attr['weight'] . ' ' . $attr['port'] . ' ' . $attr['target'];
 						break;
 					case 'MX':
-						$parameter = $r['priority'] . ' ' . $r['target'];
+						$parameter = $attr['priority'] . ' ' . $attr['host'];
+						break;
+					case 'SSHFP':
+						$parameter = $attr['algorithm'] . ' ' . $attr['fingerprint_type'] . ' ' . $attr['fingerprint'];
 						break;
 					default:
-						$parameter = $r['target'];
+						if (is_scalar($attr)) {
+							$parameter = $attr;
+						} else {
+							error("Unknown record `%s' - this is a bug", $rr);
+						}
 				}
-				$hostname = ltrim($r['name'] . '.' . $domain, '.') . '.';
-				$preamble[] = $hostname . "\t" . $r['ttl_sec'] . "\tIN\t" .
-					$r['type'] . "\t" . $parameter;
+
+				$hostname = ltrim($r['name'] . '.' . $domain, '@.') . '.';
+
+				$preamble[] = $hostname . "\t" . $r['ttl'] . "\tIN\t" .
+					$rr . "\t" . $parameter;
 
 				$this->addCache(new Record($domain,
 					[
 						'name'      => $r['name'],
-						'rr'        => $r['type'],
+						'rr'        => $rr,
 						'ttl'       => $r['ttl'] ?? static::DNS_TTL,
 						'parameter' => $parameter,
 						'meta'      => [
@@ -234,7 +298,6 @@
 			}
 			$axfrrec = implode("\n", $preamble);
 			$this->zoneCache[$domain]['text'] = $axfrrec;
-
 			return $axfrrec;
 		}
 
@@ -392,15 +455,15 @@
 				$merged = clone $old;
 				$new = $merged->merge($new);
 				$id = $this->getRecordId($old);
-				$domainid = $this->getZoneId($zone);
-				$api->do('PUT', "domains/${domainid}/records/${id}", $this->formatRecord($new));
+				$ret = $api->do('PATCH', "dns/records/${id}", ['details' => $this->formatRecord($new)]);
+				$new->setMeta('id', $ret['dns_record']['id']);
 			} catch (ClientException $e) {
 				return error("Failed to update record `%s' on zone `%s' (old - rr: `%s', param: `%s'; new - rr: `%s', param: `%s'): %s",
 					$old['name'],
 					$zone,
 					$old['rr'],
 					$old['parameter'], $new['name'] ?? $old['name'], $new['parameter'] ?? $old['parameter'],
-					$this->renderMessage($e)
+					array_get($this->renderMessage($e), 'description', 'unknown')
 				);
 			}
 			array_forget($this->zoneCache[$old->getZone()], $this->getCacheKey($old));
@@ -418,42 +481,54 @@
 		protected function formatRecord(Record $r): ?array
 		{
 			$args = [
-				'type'    => strtoupper($r['rr']),
-				'ttl_sec' => $r['ttl'] ?? static::DNS_TTL
+				'name'        => $r['name'],
+				'ttl'         => $r['ttl'] ?? static::DNS_TTL,
+				'record_type' => strtolower($r['rr']),
 			];
-			switch ($args['type']) {
+			return $args + ['properties' => $this->formatRecordProperties($r)];
+		}
+
+		private function formatRecordProperties(Record $r): array
+		{
+			switch (strtoupper($r['rr'])) {
 				case 'A':
 				case 'AAAA':
+					return ['ip' => $r['parameter']];
 				case 'CNAME':
-				case 'TXT':
 				case 'NS':
-				case 'PTR':
-					return $args + ['name' => $r['name'], 'target' => $r['parameter']];
+					return ['name' => $r['parameter']];
+				case 'TXT':
+					return ['data' => $r['parameter']];
 				case 'MX':
-					return $args + [
-							'name'     => $r['name'],
-							'priority' => (int)$r->getMeta('priority'),
-							'target'   => $r->getMeta('data')
-						];
+					return [
+						'priority' => $r->getMeta('priority'),
+						'host'     => $r->getMeta('data')
+					];
 				case 'SRV':
-					return $args + [
-							'protocol' => ltrim($r->getMeta('protocol'), '_'),
-							'service'  => $r->getMeta('service'),
-							'target'   => $r->getMeta('data'),
-							'priority' => (int)$r->getMeta('priority'),
-							'weight'   => (int)$r->getMeta('weight'),
-							'port'     => (int)$r->getMeta('port'),
-						];
+					return [
+						'target'   => $r->getMeta('data'),
+						'priority' => $r->getMeta('priority'),
+						'weight'   => $r->getMeta('weight'),
+						'port'     => $r->getMeta('port'),
+					];
+				case 'SSHFP':
+					return [
+						'algorithm'        => $r->getMeta('algorithm'),
+						'fingerprint_type' => $r->getMeta('type'),
+						'fingerprint'      => $r->getMeta('data')
+					];
 				case 'CAA':
-					return $args + [
-							'name'     => $r['name'],
-							'tag'      => $r->getMeta('tag'),
-							// doesn't support flags usage
-							'target'   => trim($r->getMeta('data'), '"')
-						];
+					return [
+						'flags'          => $r->getMeta('flags'),
+						'property_type'  => $r->getMeta('tag'),
+						// doesn't support flags usage
+						'property_value' => trim($r->getMeta('data'), '"')
+					];
 				default:
 					fatal("Unsupported DNS RR type `%s'", $r['type']);
 			}
+
+			return [];
 		}
 
 		/**
@@ -482,6 +557,6 @@
 		 */
 		protected function hasCnameApexRestriction(): bool
 		{
-			return true;
+			return false;
 		}
 	}

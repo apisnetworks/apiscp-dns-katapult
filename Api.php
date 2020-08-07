@@ -53,7 +53,7 @@
 		public function do(string $method, $endpoint, array $params = null): array
 		{
 			$method = strtoupper($method);
-			if (!\in_array($method, ['GET', 'POST', 'PUT', 'DELETE'])) {
+			if (!\in_array($method, ['GET', 'POST', 'PATCH', 'DELETE'])) {
 				error("Unknown method `%s'", $method);
 
 				return [];
