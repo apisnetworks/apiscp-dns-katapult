@@ -108,7 +108,6 @@
 			return true;
 		}
 
-
 		private function meld($uri, array $args): string
 		{
 			if (is_array($uri)) {
@@ -158,7 +157,14 @@
 
 				return error("Failed to delete record `%s' type %s", $fqdn, $rr);
 			}
-			array_forget($this->zoneCache[$r->getZone()], $this->getCacheKey($r));
+
+			array_forget_first(
+				$this->zoneCache[$r->getZone()],
+				$this->getCacheKey($r),
+				static function ($v) use ($id) {
+					return $v->getMeta('id') === $id;
+				}
+			);
 
 			return $api->getResponse()->getStatusCode() === 200;
 		}
@@ -425,7 +431,7 @@
 				$api->do('POST',
 					["dns/zones/_/verify?dns_zone[name]=%(domain)s", ['domain' => $domain]]);
 			} catch (ClientException $e) {
-				return false;
+				return error("Failed to verify `%s': %s", $domain, array_get($this->renderMessage($e), 'description', 'unknown'));
 			}
 			return true;
 		}
