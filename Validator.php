@@ -18,7 +18,20 @@
 	{
 		public function valid(ConfigurationContext $ctx, &$var): bool
 		{
-			return strlen($var) >= 32 && static::keyValid((string)$var);
+			if (!is_array($var)) {
+				return $this->validateKey($var);
+			}
+
+			if (!isset($var['token'])) {
+				return error("'token' field must be present in complex field");
+			}
+
+			return $this->validateKey((string)$var['token']) && !array_diff_key($var, ['token' => 0, 'org' => 0]);
+		}
+
+		private function validateKey(string $key): bool
+		{
+			return strlen($key) >= 32 && static::keyValid($key);
 		}
 
 		public static function keyValid(string $key): bool

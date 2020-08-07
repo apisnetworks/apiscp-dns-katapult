@@ -10,6 +10,7 @@
 
 	namespace Opcenter\Dns\Providers\Katapult;
 
+	use Auth\Sectoken;
 	use GuzzleHttp\Exception\ClientException;
 	use Module\Provider\Contracts\ProviderInterface;
 	use Opcenter\Dns\Record as BaseRecord;
@@ -49,6 +50,11 @@
 		{
 			parent::__construct();
 			$this->key = $this->getServiceValue('dns', 'key', DNS_PROVIDER_KEY);
+			if (!is_array($this->key)) {
+				$this->key = [
+					'token' => $this->key
+				];
+			}
 		}
 
 		/**
@@ -183,16 +189,48 @@
 			 */
 			$api = $this->makeApi();
 			try {
-				$resp = $api->do('POST', 'domains', [
-					'domain'    => $domain,
-					'type'      => 'master',
-					'soa_email' => "hostmaster@${domain}"
+				$resp = $api->do('POST', ['organizations/%(organization)s/dns/zones', ['organization' => $this->organizationLookup()]], [
+					'details' => [
+						'name' => $domain,
+						'ttl'  => self::DNS_TTL,
+					]
 				]);
 			} catch (ClientException $e) {
 				return error("Failed to add zone `%s', error: %s", $domain, array_get($this->renderMessage($e), 'description', 'unknown'));
 			}
 
 			return true;
+		}
+
+		private function organizationLookup(): ?string
+		{
+
+			if (isset($this->key['org'])) {
+				return $this->key['org'];
+			}
+
+			$cache = \Cache_Account::spawn($this->getAuthContext());
+			if (($org = $cache->get('dns:katapult.org')) && $org['hash'] === $this->hashKey($this->key['token'])) {
+				return $org['id'];
+			}
+
+			$api = $this->makeApi();
+			$ret = $api->do('GET', 'organizations');
+			$id = array_first($ret['organizations'], static function ($v) {
+				return $v['suspended'] === false;
+			})['id'];
+
+			$cache->set('dns:katapult.org', [
+				'id'   => $id,
+				'hash' => $this->hashKey($this->key['token'])
+			]);
+
+			return $id;
+		}
+
+		private function hashKey(string $key): string
+		{
+			return Sectoken::instantiateContexted($this->getAuthContext())->hash($key);
 		}
 
 		/**
@@ -225,7 +263,7 @@
 			$client = $this->makeApi();
 			try {
 				$records = $client->do('GET', ["dns/zones/_/records?dns_zone[name]=%(domain)s", ['domain' => $domain]]);
-				if (empty($records['dns_records'])) {
+				if (!isset($records['dns_records'])) {
 					return null;
 				}
 				$soa = array_get($this->get_records_external('', 'soa', $domain,
@@ -314,7 +352,7 @@
 		 */
 		private function makeApi(): Api
 		{
-			return new Api($this->key);
+			return new Api($this->key['token']);
 		}
 
 		/**
@@ -379,6 +417,9 @@
 			return ['ns1.katapult.io', 'ns2.katapult.io'];
 		}
 
+		/**
+		 * @inheritDoc
+		 */
 		public function verified(string $domain): bool
 		{
 			$cache = \Cache_Super_Global::spawn($this->getAuthContext());
@@ -393,7 +434,10 @@
 				if ($details['code'] === 'dns_zone_already_verified') {
 					$cache->hSet("dns:katapult.vrfy", $domain, true);
 					return true;
+				} else if ($details['code'] === 'dns_zone_not_found') {
+					return false;
 				}
+
 				return error("DNS verification failed: %s", $details['description']);
 			}
 
