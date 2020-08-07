@@ -243,7 +243,7 @@
 				}
 
 			} catch (ClientException $e) {
-				if ($e->getResponse()->getStatusCode() === 401) {
+				if ($e->getResponse()->getStatusCode() === 404) {
 					// zone doesn't exist
 					return null;
 				}
