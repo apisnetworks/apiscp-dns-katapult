@@ -34,6 +34,9 @@
 			'TXT'
 		];
 
+		// hide showing of NS apex
+		public const SHOW_NS_APEX = false;
+
 		protected const AXFR_ATTR_MAP = [
 			'A'     => 'ip',
 			'AAAA'  => 'ip',
@@ -450,6 +453,7 @@
 		public function challenges(string $domain): array
 		{
 			$api = $this->makeApi();
+			$status = [];
 			try {
 				$status = $api->do('GET',
 					["dns/zones/_/verification_details?dns_zone[name]=%(domain)s", ['domain' => $domain]]);
