@@ -39,10 +39,16 @@
 			try {
 				(new Api($key))->do('GET', 'data_centers');
 			} catch (RequestException $e) {
-				$response = \json_decode($e->getResponse()->getBody()->getContents(), true);
-				$reason = array_get($response, 'error.description', 'Invalid key');
+				$reason = $e->getMessage();
+				if (null !== ($response = $e->getResponse())) {
+					$response = \json_decode($response->getBody()->getContents(), true);
+					$reason = array_get($response, 'error.description', 'Invalid key');
+				}
 
-				return error('Katapult key failed: %s', $reason);
+				return error('%(provider)s key validation failed: %(reason)s', [
+					'provider' => 'Katapult',
+					'reason'   => $reason
+				]);
 			}
 
 			return true;
