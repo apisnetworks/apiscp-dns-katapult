@@ -138,7 +138,7 @@
 			$fn = static function ($arr, $carry = '') use (&$fn) {
 				$return = [];
 				foreach ($arr as $k => $v) {
-					$label = $carry ? "${carry}[$k]" : $k;
+					$label = $carry ? "{$carry}[$k]" : $k;
 					if (is_array($v)) {
 						$v = implode('&', $fn($v, $label));
 						$return[] = $v;
@@ -174,7 +174,7 @@
 			}
 
 			try {
-				$api->do('DELETE', "dns/records/${id}");
+				$api->do('DELETE', "dns/records/{$id}");
 			} catch (ClientException $e) {
 				$fqdn = ltrim(implode('.', [$subdomain, $zone]), '.');
 
@@ -290,11 +290,11 @@
 				$preamble = [];
 				if ($soa) {
 					$preamble = [
-						"${domain}.\t${ttldef}\tIN\tSOA\t${soa['parameter']}",
+						"{$domain}.\t{$ttldef}\tIN\tSOA\t{$soa['parameter']}",
 					];
 				}
 				foreach ($this->get_hosting_nameservers($domain) as $ns) {
-					$preamble[] = "${domain}.\t${ttldef}\tIN\tNS\t${ns}.";
+					$preamble[] = "{$domain}.\t{$ttldef}\tIN\tNS\t{$ns}.";
 				}
 
 			} catch (ClientException $e) {
@@ -523,7 +523,7 @@
 				$merged = clone $old;
 				$new = $merged->merge($new);
 				$id = $this->getRecordId($old);
-				$ret = $api->do('PATCH', "dns/records/${id}", ['details' => $this->formatRecord($new)]);
+				$ret = $api->do('PATCH', "dns/records/{$id}", ['details' => $this->formatRecord($new)]);
 				$new->setMeta('id', $ret['dns_record']['id']);
 			} catch (ClientException $e) {
 				return error("Failed to update record `%s' on zone `%s' (old - rr: `%s', param: `%s'; new - rr: `%s', param: `%s'): %s",
